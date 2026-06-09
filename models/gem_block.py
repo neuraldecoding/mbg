@@ -3,9 +3,6 @@ Graph-Enhanced Mamba (GEM) Block.
 Combines spatial graph attention, temporal Mamba processing, and cross-domain fusion gating.
 """
 
-import sys
-sys.path.insert(0, '.')
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -101,6 +98,9 @@ class GEMBlock(nn.Module):
         z_norm = self.norm2(x)
         z_temporal_in = rearrange(z_norm, 'b c t d -> (b c) t d')
         z_temporal_out = self.mamba_temporal(z_temporal_in)  # (B*C, T, D)
+        # Compensate for the odd-layer bidirectional flip in MixerModel (n_layer_mamba=1
+        # flips once, leaving the output time-reversed relative to the input).
+        z_temporal_out = z_temporal_out.flip(1)
         z_temporal = rearrange(z_temporal_out, '(b c) t d -> b c t d', b=B, c=C)
 
         # Cross-Domain Fusion Gate

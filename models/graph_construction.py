@@ -8,8 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import sys
-sys.path.insert(0, '.')
 from utils.electrode_positions import get_electrode_positions, compute_distance_matrix
 from utils.graph_utils import gaussian_adjacency
 
@@ -66,6 +64,12 @@ class AdaptiveAdjacency(nn.Module):
 
         Returns:
             A: (B*T, C, C) - adaptive adjacency matrices.
+
+        Note:
+            The full (B*T, C, C) attention matrix is recomputed on every forward pass.
+            At large batch sizes (e.g. B=64, T=30, C=22) this produces ~130 MB of
+            intermediates per layer. Consider caching or chunked computation for
+            training with large batches if memory becomes a bottleneck.
         """
         # Compute dynamic adjacency via attention
         Q = self.W_q(x)  # (B*T, C, D)

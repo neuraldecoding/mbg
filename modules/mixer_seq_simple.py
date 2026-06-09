@@ -7,6 +7,7 @@ import copy
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from modules.config_mamba import MambaConfig
 
@@ -31,19 +32,29 @@ class SimpleMambaFallback(nn.Module):
     """
     Fallback mixer when mamba-ssm is not available.
     Mimics the same interface: forward(hidden_states) -> hidden_states
-    Uses Linear + GELU + Linear as a simple sequence mixer.
+    Uses a causal Conv1d with kernel_size=4 to provide temporal receptive field,
+    followed by GELU activation and a linear projection.
     """
     def __init__(self, d_model, layer_idx=None, **kwargs):
         super().__init__()
         self.d_model = d_model
-        self.mixer = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
-            nn.GELU(),
-            nn.Linear(d_model * 2, d_model),
-        )
+        kernel_size = 4
+        # Causal Conv1d: pad on the left only so output depends only on past/current
+        self.causal_pad = kernel_size - 1
+        self.conv = nn.Conv1d(d_model, d_model, kernel_size=kernel_size, groups=1, bias=True)
+        self.activation = nn.GELU()
+        self.proj = nn.Linear(d_model, d_model)
 
     def forward(self, hidden_states, inference_params=None, **kwargs):
-        return self.mixer(hidden_states)
+        # hidden_states: (B, T, D)
+        x = hidden_states.transpose(1, 2)  # (B, D, T)
+        # Causal padding: pad left side only
+        x = F.pad(x, (self.causal_pad, 0))
+        x = self.conv(x)  # (B, D, T)
+        x = x.transpose(1, 2)  # (B, T, D)
+        x = self.activation(x)
+        x = self.proj(x)
+        return x
 
 
 class FallbackBlock(nn.Module):

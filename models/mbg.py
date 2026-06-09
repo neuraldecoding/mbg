@@ -4,7 +4,11 @@ Combines Graph Attention (spatial) with Mamba SSM (temporal) via a fusion gate.
 """
 
 import sys
-sys.path.insert(0, '.')
+import os
+
+if __name__ == '__main__':
+    # Add project root to path for direct script execution
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
