@@ -6,6 +6,7 @@ Combines spatial graph attention, temporal Mamba processing, and cross-domain fu
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 
 from .graph_attention import GraphAttentionLayer
@@ -28,9 +29,10 @@ class GEMBlock(nn.Module):
     """
 
     def __init__(self, d_model, nhead, dim_feedforward, n_layer_mamba=1,
-                 num_channels=22, dropout=0.1):
+                 num_channels=22, dropout=0.1, use_checkpoint=False):
         super().__init__()
         self.d_model = d_model
+        self.use_checkpoint = use_checkpoint
 
         # Layer norms
         self.norm1 = nn.LayerNorm(d_model)
@@ -80,6 +82,20 @@ class GEMBlock(nn.Module):
 
     def forward(self, x):
         """
+        Args:
+            x: (B, C, T, D)
+
+        Returns:
+            x: (B, C, T, D)
+        """
+        if self.use_checkpoint and self.training:
+            return checkpoint(self._forward_impl, x, use_reentrant=False)
+        return self._forward_impl(x)
+
+    def _forward_impl(self, x):
+        """
+        Internal forward implementation.
+
         Args:
             x: (B, C, T, D)
 
