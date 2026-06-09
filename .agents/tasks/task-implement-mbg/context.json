@@ -1,0 +1,24 @@
+{
+  "project_type": "Python deep learning model (EEG foundation model)",
+  "language": "Python 3.9+",
+  "build_system": "pip with requirements.txt",
+  "test_framework": "No formal test framework - uses __main__ blocks for validation",
+  "build_command": "python3 -c \"import models; print('imports ok')\"",
+  "test_command": "cd /projects/sandbox/mbg && python3 models/mbg.py",
+  "verification_instructions": "Run python3 models/mbg.py which has a __main__ block that creates the model and runs a forward pass with mock data. Verify output shape is (B, C, T, D).",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "pip3 install torch (CPU) numpy scipy einops. mamba-ssm requires CUDA so we use a fallback implementation.",
+  "environment_constraints": "Python 3.9, PyTorch 2.8.0+cpu available, mamba-ssm NOT available (requires CUDA/triton), must implement Mamba fallback for CPU testing. No torch_geometric - implement GAT from scratch.",
+  "contribution_requirements": "Follow same interface conventions as CBraMod/EEGMamba (same __init__ signature, same forward I/O shape). Do NOT use PyTorch Geometric.",
+  "key_patterns": "Both CBraMod and EEGMamba use: (1) same __init__ signature: in_dim=200, out_dim=200, d_model=200, dim_feedforward=800, seq_len=30, n_layer=12, nhead=8; (2) PatchEmbedding with temporal Conv2d + spectral FFT + positional Conv2d encoding; (3) Input (B,C,T,P) -> Output (B,C,T,out_dim); (4) model_for_tuab.py pattern: load backbone, replace proj_out with Identity, add classifier head; (5) _weights_init function for initialization; (6) einops for reshaping",
+  "relevant_files": [
+    "/projects/sandbox/EEGMamba/models/eegmamba.py",
+    "/projects/sandbox/EEGMamba/modules/mixer_seq_simple.py",
+    "/projects/sandbox/EEGMamba/modules/config_mamba.py",
+    "/projects/sandbox/CBraMod/models/cbramod.py",
+    "/projects/sandbox/CBraMod/models/criss_cross_transformer.py",
+    "/projects/sandbox/CBraMod/models/model_for_tuab.py",
+    "/projects/sandbox/EEGMamba/models/model_for_tuab.py"
+  ],
+  "directory_structure": "Target: /projects/sandbox/mbg/ with models/, modules/, utils/ subdirectories. Reference repos at /projects/sandbox/CBraMod/ and /projects/sandbox/EEGMamba/"
+}

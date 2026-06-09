@@ -1,0 +1,20 @@
+{
+  "id": "FEAT-002",
+  "type": "fix",
+  "description": "Address semantic review issues: temporal reversal bug, sys.path cleanup, fallback mixer upgrade, adjacency cost comment.",
+  "status": "completed",
+  "steps": [
+    "Fix temporal reversal bug in gem_block.py by adding z_temporal.flip(1) after mamba call on the (B*C, T, D) tensor",
+    "Replace SimpleMambaFallback in mixer_seq_simple.py with a causal Conv1d-based mixer (Conv1d kernel_size=4 + GELU + Linear)",
+    "Remove sys.path.insert(0, '.') from gem_block.py, graph_construction.py, and mbg.py; use relative imports; keep sys.path only inside __main__ block in mbg.py",
+    "Add comment about adjacency computation cost in graph_construction.py",
+    "Verify all changes pass the forward pass test"
+  ],
+  "acceptance_criteria": [
+    "python3 models/mbg.py runs successfully",
+    "Shape assertion (2,22,4,200)->(2,22,4,200) passes",
+    "No sys.path.insert at module level in any models/ or modules/ file",
+    "Fallback mixer uses Conv1d with temporal receptive field instead of pointwise MLP"
+  ],
+  "blocked_reason": null
+}
