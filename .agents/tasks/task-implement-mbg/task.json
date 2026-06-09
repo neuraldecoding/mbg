@@ -2,7 +2,7 @@
   "task_id": "task-implement-mbg",
   "task_description": "Implement the complete MBG (Mamba Based Graph) model codebase with all necessary modules, graph attention layers, GEM blocks, and utilities following the architecture documented in README.md and matching the interface conventions of CBraMod/EEGMamba reference implementations.",
   "status": "completed",
-  "feature_order": ["FEAT-001"],
+  "feature_order": ["FEAT-001", "FEAT-002"],
   "blocked_reason": null,
   "verification": {
     "build": "pass",

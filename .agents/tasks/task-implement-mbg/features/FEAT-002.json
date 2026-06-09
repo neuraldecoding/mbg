@@ -2,7 +2,7 @@
   "id": "FEAT-002",
   "type": "fix",
   "description": "Address semantic review issues: temporal reversal bug, sys.path cleanup, fallback mixer upgrade, adjacency cost comment.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Fix temporal reversal bug in gem_block.py by adding z_temporal.flip(1) after mamba call on the (B*C, T, D) tensor",
     "Replace SimpleMambaFallback in mixer_seq_simple.py with a causal Conv1d-based mixer (Conv1d kernel_size=4 + GELU + Linear)",
