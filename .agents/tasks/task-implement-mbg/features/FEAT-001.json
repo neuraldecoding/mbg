@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "feat",
   "description": "Implement the complete MBG model codebase including all modules, models, and utilities. This is a single comprehensive feature covering the entire implementation since all components are interdependent.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Create /projects/sandbox/mbg/requirements.txt with: torch>=2.0.0, mamba-ssm>=1.2.0 (optional), numpy>=1.24.0, scipy>=1.10.0, einops>=0.7.0, scikit-learn>=1.3.0",
     "Create /projects/sandbox/mbg/utils/__init__.py (empty or minimal imports)",
@@ -32,5 +32,5 @@
     "cd /projects/sandbox/mbg && python3 -c \"import sys; sys.path.insert(0,'.'); import torch; from models.mbg import MBG; m=MBG(in_dim=200,out_dim=200,d_model=200,dim_feedforward=800,seq_len=30,n_layer=4,nhead=8,num_channels=22); x=torch.randn(2,22,4,200); y=m(x); assert y.shape==(2,22,4,200), f'Expected (2,22,4,200) got {y.shape}'; print('Shape test PASSED')\""
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "All verification tests pass on CPU. Mamba fallback uses Linear+GELU+Linear as a placeholder mixer when mamba-ssm is unavailable. The model uses n_layer GEM blocks each with n_layer_mamba=1 internally. PatchEmbedding uses Conv2d temporal projection (kernel 49, stride 25) producing 25 channels mapped to d_model=200 via view, combined with FFT spectral projection. The 64-channel electrode map has exactly 64 positions from the 10-10 system."
 }
