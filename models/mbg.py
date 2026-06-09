@@ -37,11 +37,12 @@ class MBG(nn.Module):
     """
 
     def __init__(self, in_dim=200, out_dim=200, d_model=200, dim_feedforward=800,
-                 seq_len=30, n_layer=12, nhead=8, num_channels=22):
+                 seq_len=30, n_layer=12, nhead=8, num_channels=22, use_checkpoint=False):
         super().__init__()
         self.d_model = d_model
         self.n_layer = n_layer
         self.num_channels = num_channels
+        self._use_checkpoint = use_checkpoint
 
         # Patch Embedding
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
@@ -55,6 +56,7 @@ class MBG(nn.Module):
                 n_layer_mamba=1,
                 num_channels=num_channels,
                 dropout=0.1,
+                use_checkpoint=use_checkpoint,
             )
             for _ in range(n_layer)
         ])
@@ -88,6 +90,16 @@ class MBG(nn.Module):
         out = self.proj_out(hidden_states)
 
         return out
+
+    @property
+    def gradient_checkpointing(self):
+        return self._use_checkpoint
+
+    @gradient_checkpointing.setter
+    def gradient_checkpointing(self, value):
+        self._use_checkpoint = value
+        for block in self.encoder:
+            block.use_checkpoint = value
 
 
 class PatchEmbedding(nn.Module):
