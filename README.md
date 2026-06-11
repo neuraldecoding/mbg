@@ -16,8 +16,8 @@
 - [Comparison with Prior Works](#comparison-with-prior-works)
 - [Downstream Tasks](#downstream-tasks)
 - [Installation](#installation)
-- [Pretraining](#pretraining)
-- [Finetuning](#finetuning)
+- [Quick Start](#quick-start)
+- [Project Structure](#project-structure)
 - [Citation](#citation)
 - [Acknowledgements](#acknowledgements)
 
@@ -51,7 +51,7 @@ B = Batch Size, C = Channels, T = Time Segments, P = Points per Patch
                     +---------------------------+
                     |      Patch Embedding       |
                     | (Temporal Conv + Spectral  |
-                    |       Projection)          |
+                    |  FFT + Positional Conv2d)  |
                     +-------------+-------------+
                                   |
                                   v
@@ -61,28 +61,28 @@ B = Batch Size, C = Channels, T = Time Segments, P = Points per Patch
                     |   (N stacked GEM Blocks)  |
                     |                           |
                     |  +---------------------+  |
-                    |  | Graph Attention Layer|  |  <-- GNN across channels per
-                    |  | (Spatial: C dim)     |  |      time step using adjacency
-                    |  +----------+----------+  |      from electrode topology
-                    |             |              |
-                    |             v              |
-                    |  +---------------------+  |
-                    |  | Mamba SSM Scan       |  |  <-- Mamba per channel for
-                    |  | (Temporal: T dim)    |  |      temporal dynamics
+                    |  | Graph Attention Layer|  |  <-- Multi-head GAT across channels
+                    |  | (Spatial: C dim)     |  |      with adaptive adjacency
                     |  +----------+----------+  |
                     |             |              |
                     |             v              |
                     |  +---------------------+  |
-                    |  | Cross-Domain Fusion  |  |  <-- Gating mechanism to
-                    |  | Gate                 |  |      integrate spatial &
+                    |  | Mamba SSM Scan       |  |  <-- Bidirectional Mamba per channel
+                    |  | (Temporal: T dim)    |  |      for temporal dynamics
+                    |  +----------+----------+  |
+                    |             |              |
+                    |             v              |
+                    |  +---------------------+  |
+                    |  | Cross-Domain Fusion  |  |  <-- Learned gating mechanism
+                    |  | Gate                 |  |      to integrate spatial &
                     |  +----------+----------+  |      temporal features
                     |             |              |
                     +-------------+--------------+
                                   |
                                   v
                     +---------------------------+
-                    |     Projection Output      |
-                    | (Task-Specific Head)       |
+                    |     Output Projection      |
+                    | (Linear: D -> out_dim)     |
                     +---------------------------+
 ```
 
@@ -93,40 +93,42 @@ Input EEG Signal: (B, C, T, P)
          |
          v
 [Patch Embedding]
-         |  Temporal Conv1D per channel per segment
-         |  Spectral Projection (FFT-based features)
-         v
-Token Sequence: (B, C, T, D)    where D = embedding dimension
+    - Temporal Conv2d: (B, 1, C*T, P) -> conv with kernel (1,49), stride (1,25)
+    - Spectral FFT: rfft per patch -> linear projection of magnitude
+    - Positional Conv2d: depthwise conv2d (7x7) for position encoding
+    - Output: (B, C, T, D)
          |
          v
 [GEM Block x N]
     |
-    |--- [1] Graph Attention Layer ----------------+
-    |         Input: (B, C, T, D)                  |
+    |--- [1] Graph Attention Layer (pre-norm) -----+
     |         Reshape to (B*T, C, D)               |
-    |         Apply GAT with adjacency A           |
-    |         A = A_prior + A_learned              |
-    |         Output: (B, C, T, D) spatially       |
-    |                 enriched                      |
+    |         Compute adaptive adjacency:          |
+    |           A = sigmoid(alpha)*A_prior +       |
+    |               (1-sigmoid(alpha))*A_learned   |
+    |         Multi-head GAT with adjacency mask   |
+    |         Output: (B, C, T, D) z_spatial       |
     |                                              |
-    |--- [2] Mamba SSM Scan -----------------------+
-    |         Input: (B, C, T, D)                  |
+    |--- [2] Mamba SSM Scan (pre-norm) ------------+
     |         Reshape to (B*C, T, D)               |
-    |         Bidirectional Mamba2 with            |
-    |         graph-aware scan order               |
-    |         Output: (B, C, T, D) temporally      |
-    |                 enriched                      |
+    |         Bidirectional Mamba (MixerModel)     |
+    |         Output: (B, C, T, D) z_temporal      |
     |                                              |
     |--- [3] Cross-Domain Fusion Gate -------------+
-              Z_spatial, Z_temporal                 
-              gate = sigmoid(W_g * [Z_s; Z_t])     
-              Output = gate * Z_s + (1-gate) * Z_t 
+              gate = sigmoid(W_g * [z_spatial; z_temporal])
+              fused = gate * z_spatial + (1-gate) * z_temporal
+    |--- [4] Residual + FFN -----------------------+
+              x = x + fused
+              x = x + FFN(LayerNorm(x))
          |
          v
 Final Representation: (B, C, T, D)
          |
          v
-[Projection Output / Task Head]
+[Output Projection: Linear(D, out_dim)]
+         |
+         v
+Output: (B, C, T, out_dim)
 ```
 
 ---
@@ -135,58 +137,39 @@ Final Representation: (B, C, T, D)
 
 ### 1. Adaptive Graph Construction
 
-MBG constructs the channel adjacency matrix by combining two complementary sources of structural information:
+MBG constructs the channel adjacency matrix by combining two complementary sources:
 
-- **Prior Graph (A_prior):** Derived from the physical electrode distances in the International 10-20 system. Electrodes closer together on the scalp receive stronger prior connections. This encodes known anatomical proximity.
-
-- **Learned Graph (A_learned):** An attention-based dynamic adjacency matrix that is computed per sample and per layer. This captures task-dependent functional connectivity that varies with cognitive state, stimulus, and individual differences.
+- **Prior Graph (A_prior):** Derived from physical electrode distances using a Gaussian kernel on 10-20 system coordinates. Stored as a fixed buffer per layer.
+- **Learned Graph (A_learned):** Attention-based dynamic adjacency computed per sample via query-key projections.
 
 ```
-A_effective = alpha * A_prior + (1 - alpha) * A_learned
+A_effective = sigmoid(alpha) * A_prior + (1 - sigmoid(alpha)) * A_learned
 
-where alpha is a learnable parameter per layer
+where alpha is a learnable scalar parameter per layer (initialized to 0.5)
 ```
-
-This dual-graph approach captures both stable anatomical structure and dynamic functional relationships that change across samples and cognitive states.
 
 ### 2. Graph-Enhanced Mamba (GEM) Block
 
 Each GEM block performs a three-stage computation:
 
-1. **Graph Message Passing (Spatial):** Full-feature graph attention across the channel dimension at each time step. Unlike CBraMod, which splits features into two halves for spatial and temporal processing, GEM operates on the complete feature representation.
-
-2. **Mamba Scan (Temporal):** Mamba2 SSM processes the temporal sequence per channel. After spatial enrichment from the graph layer, temporal modeling benefits from already-contextualized channel representations.
-
-3. **Gating Fusion:** A learned gating mechanism integrates spatial and temporal features adaptively, allowing the model to weight the contribution of each domain per feature dimension.
-
-This design ensures that spatial context informs temporal modeling (graph before Mamba) while maintaining both representations through gated fusion rather than simple addition or concatenation.
+1. **Graph Attention (Spatial):** Multi-head GAT across channels at each time step, masked by the adaptive adjacency matrix.
+2. **Mamba SSM (Temporal):** Bidirectional Mamba processes temporal sequences per channel independently via MixerModel.
+3. **Gating Fusion:** A learned linear gate integrates spatial and temporal outputs adaptively.
 
 ### 3. Multi-Scale Graph Pooling for Pretraining
 
-During pretraining, MBG employs hierarchical graph pooling to create multi-resolution brain representations:
-
-```
-Level 0: Individual electrodes (e.g., 64 nodes)
-Level 1: Brain sub-regions (e.g., 16 clusters: frontal-left, frontal-right, 
-         temporal-left, temporal-right, central, parietal, occipital, ...)
-Level 2: Brain hemispheres + midline (3 super-nodes)
-Level 3: Global brain state (1 node)
-```
-
-This multi-scale hierarchy provides:
-- Fine-grained electrode-level reconstruction targets
-- Region-level contrastive objectives
-- Global representation for downstream classification
+Hierarchical graph pooling for multi-resolution brain representations:
+- Level 0: Individual electrodes
+- Level 1: Brain sub-regions (frontal, central, parietal, temporal, occipital clusters)
+- Level 2: Brain hemispheres + midline
+- Level 3: Global brain state
 
 ### 4. Bidirectional Mamba with Graph-Aware Scan Order
 
-Standard Mamba processes sequences in a fixed linear order. For EEG, a naive channel ordering (e.g., Fp1, Fp2, F3, F4, ...) does not reflect spatial proximity. MBG introduces **graph-aware scan ordering**:
-
-- **BFS Order:** Breadth-first traversal from a seed electrode (e.g., Cz) creates a scan sequence where spatially adjacent electrodes are processed consecutively.
-- **DFS Order:** Depth-first traversal captures hierarchical spatial paths from central to peripheral electrodes.
-- **Bidirectional:** Forward and backward scans in both orderings provide comprehensive spatial coverage.
-
-This makes the Mamba temporal scan implicitly aware of the spatial electrode topology, even before the explicit graph attention layer processes the signal.
+Graph-aware scan ordering for topology-preserving sequence processing:
+- **BFS Order:** Breadth-first traversal from a seed electrode creates spatially coherent scan sequences.
+- **DFS Order:** Depth-first traversal follows strongest connection paths.
+- Both orderings are deterministic and weighted by adjacency strength.
 
 ---
 
@@ -194,44 +177,30 @@ This makes the Mamba temporal scan implicitly aware of the spatial electrode top
 
 | Aspect | CBraMod (ICLR 2025) | EEGMamba (Neural Networks 2025) | **MBG (Ours)** |
 |--------|---------------------|--------------------------------|----------------|
-| **Backbone** | Criss-Cross Transformer | Mamba2 SSM | Graph Attention + Mamba2 SSM |
-| **Spatial Modeling** | Attention across channels (fully connected) | Implicit via flattened sequence | Explicit GNN with electrode topology |
-| **Temporal Modeling** | Attention across time segments | Mamba2 over flattened sequence | Mamba2 per channel (after graph enrichment) |
+| **Backbone** | Criss-Cross Transformer | Mamba2 SSM | Graph Attention + Mamba SSM |
+| **Spatial Modeling** | Fully connected attention | Implicit via flattened sequence | Explicit GAT with electrode topology |
+| **Temporal Modeling** | Attention across time (O(T^2)) | Mamba over flattened sequence (O(C*T)) | Mamba per channel (O(T) per channel) |
 | **Graph Structure** | Not used | Not used | Adaptive (prior + learned adjacency) |
-| **Complexity** | O(C^2 + T^2) per block | O((C*T)) linear | O(C^2 + C*T) per block |
-| **Spatial Inductive Bias** | None (learned from data) | None (positional embedding only) | Strong (electrode topology graph) |
+| **Spatial Inductive Bias** | None | None | Strong (Gaussian kernel on 10-20 distances) |
 | **Feature Processing** | Split features for spatial/temporal | Full features in single sequence | Full features in both, then gated fusion |
-| **Scan Order** | N/A (attention-based) | Fixed linear (channel-then-time) | Graph-aware BFS/DFS ordering |
-| **Multi-Scale** | Single resolution | Single resolution | Hierarchical graph pooling |
-| **Pretraining Data** | TUEG | TUEG | TUEG |
-| **Parameters** | ~5M | ~3M | ~6M (estimated) |
-
-### Key Advantages of MBG
-
-1. **Topology-Aware:** Explicitly leverages the known physical layout of EEG electrodes as a structural prior, reducing the amount of spatial structure that must be learned from data alone.
-
-2. **Adaptive Connectivity:** The learned adjacency matrix discovers functional connections that go beyond physical proximity (e.g., inter-hemispheric coherence between homologous regions).
-
-3. **Efficient Temporal Processing:** Retains Mamba's linear-time complexity for temporal modeling while adding spatial graph structure that is typically O(C^2) -- manageable given typical EEG channel counts (16-256).
-
-4. **Complementary Fusion:** Rather than forcing a single mechanism to handle both spatial and temporal reasoning, MBG uses specialized modules for each and fuses them adaptively.
+| **Scan Order** | N/A (attention-based) | Fixed linear | Graph-aware BFS/DFS ordering |
 
 ---
 
 ## Downstream Tasks
 
-MBG supports evaluation on the following downstream benchmarks covering diverse EEG applications:
+MBG supports evaluation on diverse EEG benchmarks:
 
 | Dataset | Task | Domain | Channels | Subjects |
 |---------|------|--------|----------|----------|
 | BCI Competition IV 2a | Motor Imagery Classification | BCI | 22 | 9 |
-| TUAB | Abnormal Detection | Clinical | 21 | 2,993 |
-| TUEV | Event Detection | Clinical | 21 | 313 |
+| TUAB | Abnormal Detection | Clinical | 16-21 | 2,993 |
+| TUEV | Event Detection | Clinical | 16-21 | 313 |
 | ISRUC | Sleep Staging | Sleep | 10 | 100 |
 | SEED-V | Emotion Recognition (5-class) | Affective | 62 | 16 |
 | CHB-MIT | Seizure Detection | Clinical | 23 | 22 |
 | FACED | Emotion Recognition | Affective | 30 | 123 |
-| SHU | Motor Imagery | BCI | 14 | 25 |
+| SHU | Motor Imagery | BCI | 14-22 | 25 |
 | Speech | Speech Imagery | BCI | 64 | 15 |
 | Stress | Stress Detection | Affective | 14 | 28 |
 | PhysioNet | Motor Imagery | BCI | 64 | 109 |
@@ -243,6 +212,19 @@ MBG supports evaluation on the following downstream benchmarks covering diverse 
 
 ## Installation
 
+### Requirements
+
+```
+torch>=2.0.0
+mamba-ssm>=1.2.0   # requires CUDA
+numpy>=1.24.0
+scipy>=1.10.0
+einops>=0.7.0
+scikit-learn>=1.3.0
+```
+
+### Local Installation
+
 ```bash
 # Clone the repository
 git clone https://github.com/neuraldecoding/mbg.git
@@ -252,65 +234,93 @@ cd mbg
 conda create -n mbg python=3.10
 conda activate mbg
 
-# Install dependencies
+# Install PyTorch (adjust CUDA version as needed)
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# Install mamba-ssm (requires matching CUDA toolkit)
+pip install mamba-ssm einops
+
+# Install remaining dependencies
 pip install -r requirements.txt
 ```
 
-### Requirements
+### Google Colab
 
-```
-torch>=2.0.0
-mamba-ssm>=1.2.0
-torch-geometric>=2.4.0
-numpy>=1.24.0
-scipy>=1.10.0
-einops>=0.7.0
-tensorboard>=2.14.0
-scikit-learn>=1.3.0
-mne>=1.5.0
-```
+Use the provided notebook `MBG_Comprehensive_Guide.ipynb` which handles installation automatically. See the [Quick Start](#quick-start) section below.
 
-> **Note:** Installation instructions will be updated once the codebase is finalized.
+> **Note:** `mamba-ssm` and `causal-conv1d` require CUDA compilation. If installation fails due to CUDA version mismatch, install pre-built wheels matching your PyTorch/CUDA version. See [mamba-ssm GitHub](https://github.com/state-spaces/mamba) for compatible versions.
 
 ---
 
-## Pretraining
+## Quick Start
 
-MBG is pretrained on the Temple University EEG Corpus (TUEG) using a masked patch prediction objective combined with multi-scale graph contrastive learning.
+### Basic Usage
 
-```bash
-# Pretraining (placeholder)
-python pretrain_main.py \
-    --data_path /path/to/tueg \
-    --output_dir ./pretrained_weights \
-    --epochs 200 \
-    --batch_size 64 \
-    --lr 1e-4 \
-    --num_layers 8 \
-    --embed_dim 256 \
-    --num_heads 8
+```python
+import torch
+from models.mbg import MBG
+
+# Initialize model
+model = MBG(
+    in_dim=200,          # Points per patch (e.g., 1 second at 200Hz)
+    out_dim=200,         # Output dimension per patch
+    d_model=200,         # Hidden dimension
+    dim_feedforward=800, # FFN intermediate dimension
+    seq_len=30,          # Maximum number of time segments
+    n_layer=12,          # Number of GEM blocks
+    nhead=8,             # Number of attention heads
+    num_channels=22      # Number of EEG channels
+)
+
+# Input: (batch, channels, time_segments, points_per_patch)
+x = torch.randn(8, 22, 4, 200)
+output = model(x)  # Output: (8, 22, 4, 200)
 ```
 
-> **Note:** Pretraining scripts and configurations will be released upon paper acceptance.
+### Graph Utilities
 
----
+```python
+from utils.electrode_positions import get_electrode_positions, compute_distance_matrix
+from utils.graph_utils import gaussian_adjacency, bfs_ordering, dfs_ordering
 
-## Finetuning
+# Get electrode positions (supports 19, 22, 64 channels)
+positions = get_electrode_positions(22)
+dist_matrix = compute_distance_matrix(positions)
+adj_matrix = gaussian_adjacency(dist_matrix, sigma=1.0)
 
-After pretraining, MBG can be finetuned on any downstream task:
-
-```bash
-# Finetuning example (placeholder)
-python finetune_main.py \
-    --task tuab \
-    --pretrained_path ./pretrained_weights/mbg_pretrained.pth \
-    --data_path /path/to/tuab \
-    --epochs 50 \
-    --batch_size 32 \
-    --lr 5e-5
+# Graph-aware scan orderings
+bfs_order = bfs_ordering(adj_matrix, seed_idx=9)  # From Cz
+dfs_order = dfs_ordering(adj_matrix, seed_idx=9)
 ```
 
-> **Note:** Finetuning scripts and task-specific configurations will be released upon paper acceptance.
+### Task-Specific Model (TUAB Example)
+
+```python
+from models.model_for_tuab import Model
+
+# Requires a param object with configuration
+# See models/model_for_tuab.py for the full interface
+```
+
+### Training Utilities
+
+```python
+from utils.training_utils import CheckpointManager, EarlyStopping, MetricLogger
+from utils.kfold_cv import KFoldCrossValidator, compute_metrics, aggregate_fold_results
+
+# Checkpoint management (designed for Google Colab + Drive)
+checkpoint_manager = CheckpointManager(
+    checkpoint_dir='/content/drive/MyDrive/MBG_Project/checkpoints',
+    save_every_n_epochs=10,
+    keep_top_k=3,
+    metric_name='balanced_accuracy',
+    metric_mode='max',
+)
+
+# Subject-independent K-Fold cross validation
+cv = KFoldCrossValidator(n_folds=5, split_type='group', random_seed=42)
+splits = cv.get_splits(labels, groups=subject_ids)
+```
 
 ---
 
@@ -319,28 +329,26 @@ python finetune_main.py \
 ```
 mbg/
 ├── models/
-│   ├── mbg.py                    # Main MBG model
-│   ├── graph_attention.py        # Graph Attention Network layers
-│   ├── mamba_block.py            # Mamba2 SSM blocks
-│   ├── gem_block.py              # Graph-Enhanced Mamba block
-│   ├── graph_construction.py     # Adaptive adjacency matrix
-│   ├── graph_pooling.py          # Multi-scale graph pooling
-│   └── model_for_*.py            # Task-specific heads
-├── datasets/
-│   └── *_dataset.py              # Dataset loaders
-├── preprocessing/
-│   └── preprocessing_*.py        # Data preprocessing scripts
+│   ├── __init__.py               # Exports MBG class
+│   ├── mbg.py                    # Main MBG model (PatchEmbedding + GEM Blocks + proj_out)
+│   ├── gem_block.py              # GEM Block (Graph Attention + Mamba + Fusion Gate + FFN)
+│   ├── graph_attention.py        # Multi-head GAT with adaptive adjacency masking
+│   ├── graph_construction.py     # AdaptiveAdjacency module & get_prior_adjacency()
+│   └── model_for_tuab.py         # Task-specific head for TUAB binary classification
+├── modules/
+│   ├── __init__.py               # Exports MambaConfig, MixerModel
+│   ├── config_mamba.py           # Mamba SSM configuration dataclass
+│   └── mixer_seq_simple.py       # MixerModel (Mamba backbone wrapper)
 ├── utils/
-│   ├── graph_utils.py            # Graph construction utilities
-│   ├── electrode_positions.py    # 10-20 system coordinates
-│   └── util.py                   # General utilities
-├── pretrain_main.py              # Pretraining entry point
-├── finetune_main.py              # Finetuning entry point
-├── requirements.txt              # Dependencies
+│   ├── __init__.py
+│   ├── electrode_positions.py    # 10-20 system coordinates (19/22/64 channels)
+│   ├── graph_utils.py            # BFS/DFS orderings, gaussian_adjacency()
+│   ├── training_utils.py         # CheckpointManager, EarlyStopping, MetricLogger
+│   └── kfold_cv.py               # KFoldCrossValidator, compute_metrics, statistical_test
+├── MBG_Comprehensive_Guide.ipynb # Comprehensive notebook (Colab-ready)
+├── requirements.txt              # Python dependencies
 └── README.md                     # This file
 ```
-
-> **Note:** Project structure will be populated as development progresses.
 
 ---
 
@@ -361,12 +369,12 @@ If you find this work useful for your research, please cite:
 
 ## Acknowledgements
 
-This work builds upon the following prior works from our research group:
+This work builds upon:
 
 - **CBraMod:** Yi, Z., et al. "CBraMod: A Criss-Cross Brain Foundation Model for EEG Decoding." *ICLR 2025*.
 - **EEGMamba:** Yi, Z., et al. "EEGMamba: Bidirectional Mamba with Cross-Domain Transfer Learning for EEG Foundation Model." *Neural Networks 2025*.
 
-We thank the developers of [Mamba](https://github.com/state-spaces/mamba), [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/), and [MNE-Python](https://mne.tools/) for their excellent open-source tools.
+We thank the developers of [Mamba](https://github.com/state-spaces/mamba) and [MNE-Python](https://mne.tools/) for their excellent open-source tools.
 
 ---
 
