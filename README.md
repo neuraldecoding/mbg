@@ -357,11 +357,11 @@ mbg/
 If you find this work useful for your research, please cite:
 
 ```bibtex
-@article{mbg2025,
+@article{awangga2026mbg,
   title={MBG: A Graph-Guided Mamba Foundation Model for EEG Decoding},
-  author={},
+  author={Awangga, Rolly Maulana and Suyanto and Purnama, Bedy},
   journal={},
-  year={2025}
+  year={2026}
 }
 ```
 
