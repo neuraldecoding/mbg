@@ -245,6 +245,51 @@ pip install mamba-ssm einops
 pip install -r requirements.txt
 ```
 
+### Special Instructions for RTX 50 Series / CUDA 12.8
+
+If you are using a cutting-edge GPU (e.g., NVIDIA GeForce RTX 5060 Ti `sm_120`) with CUDA 12.8 and Python 3.12, Mamba-SSM requires specific configurations and code patches to prevent C++ signature mismatches.
+
+**1. Create a Clean Virtual Environment**
+```bash
+python3.12 -m venv ~/awangga/venv
+source ~/awangga/venv/bin/activate
+```
+
+**2. Install Strict Dependencies**
+Install PyTorch 2.7.0 (Nightly) and downgrade `transformers` to avoid missing classes:
+```bash
+pip install torch==2.7.0 --extra-index-url https://download.pytorch.org/whl/cu128
+pip install transformers==4.40.0
+```
+Compile the Causal-Conv1d and Mamba-SSM kernels directly from source (takes 5-15 mins):
+```bash
+pip install "git+https://github.com/Dao-AILab/causal-conv1d.git@v1.5.0"
+pip install "git+https://github.com/state-spaces/mamba.git@v2.2.4"
+```
+
+**3. Apply Code Patch (CRITICAL)**
+Due to an argument mismatch in `causal-conv1d` 1.5.0, you must patch the `mamba-ssm` source code inside your virtual environment.
+Edit `~/awangga/venv/lib/python3.12/site-packages/mamba_ssm/ops/selective_scan_interface.py`:
+
+*Forward Pass Fix (Around line 208):*
+```python
+# Replace causal_conv1d_cuda.causal_conv1d_fwd with cpp_functions.causal_conv1d_fwd_function
+conv1d_bias = conv1d_bias.contiguous() if conv1d_bias is not None else None
+import causal_conv1d.cpp_functions as cpp_functions
+conv1d_out = cpp_functions.causal_conv1d_fwd_function(
+    x, conv1d_weight, conv1d_bias, None, None, None, True
+)
+```
+
+*Backward Pass Fix (Around line 356):*
+```python
+# Replace causal_conv1d_cuda.causal_conv1d_bwd with cpp_functions.causal_conv1d_bwd_function
+import causal_conv1d.cpp_functions as cpp_functions
+dx, dconv1d_weight, dconv1d_bias, *_ = cpp_functions.causal_conv1d_bwd_function(
+    x, conv1d_weight, conv1d_bias, dconv1d_out, None, None, None, dx, False, True
+)
+```
+
 ### Google Colab
 
 Use the provided notebook `MBG_Comprehensive_Guide.ipynb` which handles installation automatically. See the [Quick Start](#quick-start) section below.
