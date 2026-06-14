@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Compiled repos and logs
+causal-conv1d/
+mamba/
+MBG_Project/
+*.log
+run_and_notify.sh
